@@ -14,6 +14,7 @@ import re
 import interactions
 import sqlite3
 import crypt
+import traceback
 from configparser import ConfigParser
 from awfulpy import *
 from contextlib import closing
@@ -22,6 +23,7 @@ from datetime import datetime
 ###
 # Config
 ###
+
 secrets = ConfigParser()
 secrets.read('secrets.ini')
 config = ConfigParser()
@@ -47,8 +49,6 @@ profile = AwfulProfile(bbuserid, bbpassword, sessionid, sessionhash)
 
 bot = interactions.Client(token=bottoken)
 
-#db_cursor.execute('''CREATE TABLE goons (userID TEXT NOT NULL, discordID TEXT NOT NULL, secret TEXT NOT NULL, is_banned INTEGER NOT NULL CHECK (is_banned IN (0, 1)), is_authed INTEGER NOT NULL CHECK (is_authed IN (0, 1)), is_sus INTEGER NOT NULL CHECK (is_sus IN (0, 1))) ''')
-
 ###
 # Setup logging
 ###
@@ -61,7 +61,6 @@ loglevelDict = {
     'critical' : logging.CRITICAL}
 
 logging.basicConfig(filename=config['Logging']['file'], encoding='utf-8', level=loglevelDict[config['Logging']['level']])
-
 
 ###
 # db wrapper for parameterized queries
@@ -108,16 +107,14 @@ async def auth_processor():
 
                 
                 result = await profile.fetch_profile_by_id(userid)
-                fulltext = result.raw_profile_text
+                fulltext = result.biography
                 
                 position = fulltext.find(r[2])
                 if position > -1:
                     auth_params = {"userid":userid}
                     try:
                         
-                        #await get(bot, interactions.Member, parent_id=guildid, object_id=r[1])
-                        
-                        await user.add_role(goonrole,guildid)
+                        await user.add_role(goonrole,int(guildid))
                         
                         success = success + "\n" + user.mention
                         
@@ -127,13 +124,13 @@ async def auth_processor():
                     
                     except Exception:
                         logging.error("Could not auth user", exc_info=True)
-                        await botspamchannel.send("Authenticating user " + user.mention + " failed.")
+                        await botspamchannel.send(f"Authenticating user {user.mention} failed.")
                         await asyncio.sleep(10)
                         continue
                 await asyncio.sleep(10)
                 
             if displaymessage:
-                await botspamchannel.send("Gave goon role to the following users " + success)
+                await botspamchannel.send(f"Gave goon role to the following users {success}")
                     
         logging.info("auth worker waiting")
         await asyncio.sleep(890)
@@ -157,28 +154,39 @@ class BannedUser(Exception):
 #   Authentication functions
 ###
 
-async def get_userid(username):
-    result = await profile.fetch_profile(username)
-    return result.userid
+async def get_profile(userid = None, username = None):
+    if userid:
+        return await profile.fetch_profile_by_id(userid)
+    elif username:
+        return await profile.fetch_profile(username)
+    else:
+        raise ArgumentError("get_profile called without userid or username")
 
+
+async def get_userid(username):
+    user_profile = await get_profile(username=username)
+    return user_profile.userid
+
+async def get_username(userid):
+    user_profile = await get_profile(userid=userid)
+    return user_profile.username
     
 async def calculate_suspicion(userid):
-    result = await profile.fetch_profile_by_id(userid)
-    fulltext = result.raw_profile_text
+    user_profile = await get_profile(userid=userid)
 
     sus = 0
     
     #sub 300 postcount is sus
-    re_res = re.search(r"en \<b\>-?([0-9]*)\<\/b\> po", fulltext)
+    #re_res = re.search(r"en \<b\>-?([0-9]*)\<\/b\> po", fulltext)
 
-    postcount = int(re_res.group(1))
+    postcount = user_profile.posts
     
     if postcount < 300:
         sus = 1
      
     #regdate less than 3 months is sus
-    result = re.search(r"registering on \<b\>(.*)\<\/b\>", fulltext)
-    regdate = datetime.strptime(result.group(1), "%b %d, %Y")
+
+    regdate = datetime.utcfromtimestamp(user_profile.joindate)
     
     threshhold = datetime.timestamp(datetime.now()) - (2629800*3)
  
@@ -197,7 +205,7 @@ async def get_user(userid,discordid):
     
     results = query(dbfile, get_query, get_params)
     if len(results) > 1:
-        raise DuplicateEntry("Expected 1 result, got " + len(results))
+        raise DuplicateEntry(f"Expected 1 result, got {len(results)}")
     
     if not results:
     
@@ -217,13 +225,13 @@ async def get_user(userid,discordid):
         query(dbfile, ins_query,ins_params)
         results = query(dbfile, get_query, get_params)
     
-    if results[0][0] != userid:
+    if results[0][0] != str(userid):
         logging.error("UserMismatch - " + str(results))
-        raise UserMismatch("User provided " + userid + ", db contained " + results[0][0])
+        raise UserMismatch(f"User provided {userid}, db contained {results[0][0]}")
     
     if results[0][1] != discordid:
         logging.error("DiscordMismatch - " + str(results))
-        raise DiscordMismatch("User provided " + discordid + ", db contained " + results[0][1])
+        raise DiscordMismatch(f"User provided {discordid}, db contained {results[0][1]}")
     
     if results[0][3]:
         logging.error("BannedUser - " + str(results))
@@ -238,7 +246,9 @@ async def get_user(userid,discordid):
 ###
 
 '''
-
+AUTHME
+AUTHME
+AUTHME
 '''
 
 @bot.command(
@@ -286,7 +296,7 @@ async def authme(ctx: interactions.CommandContext, username: str):
         await ctx.send(response)
         return
     
-    response = response + "\n" + f"Put the following key in your SA profile: {results[0][2]}"
+    response = f"{response}\nPut the following key in your SA profile \"about me\" section: {results[0][2]}\nDo not put it in ICQ number or homepage or any other field."
     
     if results[0][5]:
         await botspamchannel.send("User " + ctx.author.mention + " needs attention to complete authentication.")
@@ -298,7 +308,9 @@ async def authme(ctx: interactions.CommandContext, username: str):
 
 
 '''
-
+AUTHEM
+AUTHEM
+AUTHEM
 '''
 
 @bot.command(
@@ -348,7 +360,7 @@ async def authem(ctx: interactions.CommandContext, user: interactions.User, user
         await ctx.send(response)
         return
     
-    response = response + "\n" + user.mention + f" Put the following key in your SA profile: {results[0][2]}"
+    response = response + "\n" + user.mention + f" Put the following key in your SA profile \"about me\" section: {results[0][2]}\nDo not put it in ICQ number or homepage or any other field."
     
     if results[0][5]:
         await botspamchannel.send("User " + user.mention + " needs attention to complete authentication.")
@@ -360,7 +372,91 @@ async def authem(ctx: interactions.CommandContext, user: interactions.User, user
 
 
 '''
+WHOIS
+WHOIS
+WHOIS
+'''
 
+@bot.command(
+    name="whois",
+    description="Find a user on this server",
+    dm_permission=False,
+    default_member_permissions=interactions.Permissions.MANAGE_ROLES,
+    options = [
+        interactions.Option(
+            name = "discord",
+            description = "Their discord username",
+            type=interactions.OptionType.USER,
+            required=False),
+        interactions.Option(
+            name = "username",
+            description = "Their forums username",
+            type=interactions.OptionType.STRING,
+            required=False),],)
+
+async def whois(ctx: interactions.CommandContext, discord=None, username=None):
+
+    user = discord
+
+    userid_query = '''SELECT * FROM goons WHERE userID=:userid'''
+    discordid_query = '''SELECT * FROM goons WHERE discordID=:discordid'''
+
+
+    #botspamchannel = interactions.Channel(**await bot._http.get_channel(bschan), _client=bot._http)
+    response = ""
+
+    if user:
+        try:
+            discordid = int(user.id)
+        except Exception:
+            response = "User is not on this discord"
+            await ctx.send(response, ephemeral=True)
+            return
+        
+        params = {"discordid": discordid}
+        result = query(dbfile, discordid_query, params)
+        
+        if result:
+            for r in result:
+                username = await get_username(r[0])
+                try:
+                    response = f"{response}\n{user.mention} - {username}"
+                except Exception:
+                    response = f"{response}\nUser not in discord - {username}"            
+        
+ 
+    elif username:
+        userid = await get_userid(username)
+        if userid is None:
+            response = f"{username} is not registered on SA."
+            await ctx.send(response, ephemeral=True)
+            return
+            
+        params = {"userid": userid}
+        
+        result = query(dbfile, userid_query, params)
+        
+        if result:
+            for r in result:
+                user = interactions.Member(**await bot._http.get_member(guildid,r[1]), _client=bot._http)
+                try:
+                    response = f"{response}\n{user.mention} - {username}"
+                except Exception:
+                    response = f"{response}\nUser not in discord - {username}"
+                
+        else:
+            response = f"User {username} is not registered on this discord"            
+        
+    
+    else:
+        response = "You must provide at least one option."
+    
+    await ctx.send(response, ephemeral=True)
+
+'''
+LISTSUS
+LISTSUS
+LISTSUS
 '''
 
 @bot.command(
@@ -382,11 +478,18 @@ async def listsus(ctx: interactions.CommandContext):
     if result:
         response = str(len(result)) + " goons are sus:"
         for r in result:
-            user = interactions.Member(**await bot._http.get_member(guildid,r[1]), _client=bot._http)
             try:
-                response = response + "\n" + user.mention + " (ID: " + r[0] + ")"
-            except Exception:
-                response = response + "\n User not in discord (ID: " + r[0] + ")"
+                userid = r[0]
+                username = await get_username(r[0])
+                
+                print(r[1])
+                user = interactions.Member(**await bot._http.get_member(guildid,r[1]), _client=bot._http)
+
+                response = f"{response}\n{user.mention} (ID: {userid}, Handle: {username})"
+
+            except interactions.api.error.LibraryException as e:
+                print(repr(e))
+                response = f"{response}\nUser {r[1]} not in discord (ID: {userid}, Handle: {username})"
 
     else:
         response = "No goons are currently being sus."
@@ -394,7 +497,9 @@ async def listsus(ctx: interactions.CommandContext):
     await ctx.send(response)
 
 '''
-
+LISTUNAUTH
+LISTUNAUTH
+LISTUNAUTH
 '''
 
 @bot.command(
@@ -417,10 +522,12 @@ async def listunauth(ctx: interactions.CommandContext):
         response = str(len(result)) + " goons haven't put the code in:"
         for r in result:
             user = interactions.Member(**await bot._http.get_member(guildid,r[1]), _client=bot._http)
+            userid = r[0]
+            username = await get_username(r[0])
             try:
-                response = response + "\n" + user.mention + " (ID: " + r[0] + ")"
+                response = f"{response}\n{user.mention} (ID: {userid}, Handle: {username})"
             except Exception:
-                response = response + "\n User not in discord (ID: " + r[0] + ")"
+                response = f"{response}\nUser not in discord (ID: {userid}, Handle: {username})"
 
     else:
         response = "All the goons have followed instructions."
@@ -428,7 +535,9 @@ async def listunauth(ctx: interactions.CommandContext):
     await ctx.send(response)
 
 '''
-
+LISTBAN
+LISTBAN
+LISTBAN
 '''
 
 @bot.command(
@@ -449,10 +558,48 @@ async def listban(ctx: interactions.CommandContext):
         response = str(len(result)) + " goons are banned:"
         for r in result:
             user = interactions.Member(**await bot._http.get_member(guildid,r[1]), _client=bot._http)
+            
+            userid = r[0]
+            username = await get_username(r[0])
             try:
-                response = response + "\n" + user.mention + " (ID: " + r[0] + ")"
+                response = f"{response}\n{user.mention} (ID: {userid}, Handle: {username})"
             except Exception:
-                response = response + "\n User not in discord (ID: " + r[0] + ")"
+                response = f"{response}\nUser not in discord (ID: {userid}, Handle: {username})"
+    
+    else:
+
+        response = "Nobody's banned!"
+    
+    await ctx.send(response)
+
+'''
+LISTKLINE
+LISTKLINE
+LISTKLINE
+'''
+
+@bot.command(
+    name="listkline",
+    description="List all banned goons",
+    dm_permission=False,
+    default_member_permissions=interactions.Permissions.MANAGE_ROLES,)
+
+
+
+async def listkline(ctx: interactions.CommandContext):
+
+    querystr = '''SELECT * FROM kos'''
+
+    params = {}
+    result = query(dbfile, querystr, params)
+    if result:
+        response = str(len(result)) + " goons are banned:"
+        for r in result:
+            #user = interactions.Member(**await bot._http.get_member(guildid,r[1]), _client=bot._http)
+            
+            userid = r[0]
+            username = await get_username(r[0])
+            response = f"{response}\nID: {userid}, Handle: {username}"
     
     else:
 
@@ -462,7 +609,9 @@ async def listban(ctx: interactions.CommandContext):
 
 
 '''
-
+UNSUS
+UNSUS
+UNSUS
 '''
 
 @bot.command(
@@ -500,7 +649,9 @@ async def unsus(ctx: interactions.CommandContext, username: str):
     await ctx.send(response)
 
 '''
-
+KLINE
+KLINE
+KLINE
 '''
 
 @bot.command(
@@ -520,6 +671,7 @@ async def unsus(ctx: interactions.CommandContext, username: str):
 async def kline(ctx: interactions.CommandContext, username: str):
 
     querystr = '''INSERT INTO kos VALUES (:userid)'''
+    querystr2 = '''UPDATE goons SET is_banned=1 WHERE userID=:userid LIMIT 1'''
 
     response = ""
     userid = await get_userid(username)
@@ -532,13 +684,16 @@ async def kline(ctx: interactions.CommandContext, username: str):
     params = {"userid": userid}
     
     query(dbfile, querystr, params)
+    query(dbfile, querystr2, params)
 
     response  = f"{str(username)} with id {userid} has been k-lined."
     
     await ctx.send(response)
 
 '''
-
+UNKLINE
+UNKLINE
+UNKLINE
 '''
 
 @bot.command(
@@ -576,7 +731,9 @@ async def unkline(ctx: interactions.CommandContext, username: str):
     await ctx.send(response)
 
 '''
-
+BANGOON
+BANGOON
+BANGOON
 '''
 
 @bot.command(
@@ -612,7 +769,9 @@ async def bangoon(ctx: interactions.CommandContext, username: str):
     
     
 '''
-
+UNBANGOON
+UNBANGOON
+UNBANGOON
 '''
 
 @bot.command(
@@ -648,44 +807,55 @@ async def unbangoon(ctx: interactions.CommandContext, username: str):
 
 ## TODO: Purge command
 
-###
-# Exception handler, crash fast for unhandled exceptions inside async functions
-###
-
-def handle_exception(loop, context):
-    # context["message"] will always be there; but context["exception"] may not
-    msg = context.get("exception", context["message"])
-    print("Please wait, crashing...")
-    logging.critical(f"Caught exception: {msg}", exc_info=True)
-    logging.info("Shutting down...")
-    os._exit(2)
-
-
+def handle_exception(loop,context):
+    msg = context.get(message)
+    e = context.get(exception)
+    traceback = ''.join(traceback.format_exception(e))
+    logging.error(f"{msg}\n{traceback}")
+    print("Please wait, crashing...")    
+    os._exit(3)
+    
 
 ###
 # Main program starts here
 ###
 
-logging.info('===Startup===')
-loop = asyncio.get_event_loop()
-loop.set_exception_handler(handle_exception)
+async def main():
 
-# Backend Init
+    #logging.info('===Startup===')
 
-asyncio.ensure_future(auth_processor())
+    loop = asyncio.get_running_loop()
+    loop.set_exception_handler(handle_exception)
 
 
-# Discord init
-logging.info('Initializing Discord')
-asyncio.ensure_future(bot._ready())
+    background = asyncio.create_task(auth_processor())
+    foreground = asyncio.create_task(bot._ready())
+    
+    done, pending = await asyncio.wait(
+        [background, foreground],
+        return_when=asyncio.FIRST_EXCEPTION
+    )
+    
+    for task in pending:
+        task.cancel()
+    
+    for task in done:
+        if task.exception():
+            logging.error(''.join(traceback.format_exception(task.exception())))
+        
 
 try:
-    loop.run_forever()
+    retval = 0
+    
+    #hacky because interactions weirdness
+    bot._loop.run_until_complete(main())
 except KeyboardInterrupt:
     print('\nCtrl-C received, quitting immediately')
     logging.critical('Ctrl-C received, quitting immediately')
-    os._exit(1)
+    retval = 1
 except Exception:
     print("Please wait, crashing...")
     logging.critical("Fatal error in main loop", exc_info=True)
-    os._exit(2)
+    retval = 2
+finally:
+    os._exit(retval)
